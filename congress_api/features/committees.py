@@ -471,43 +471,51 @@ async def get_committee_communications(
             logger.warning(f"Invalid limit: {limit}")
             return limit_validation.error_message
         
-        # Build endpoint
-        endpoint = f"/committee/{chamber.lower()}/{committee_code}/communications"
-        
+        # Build endpoint. The committee communications sub-resource is chamber-
+        # specific: /committee/{chamber}/{code}/house-communication (House) or
+        # /senate-communication (Senate). There is no /communications path, and
+        # Joint committees have no communications resource.
+        chamber_l = chamber.lower()
+        if chamber_l == "house":
+            sub_resource, response_key = "house-communication", "houseCommunications"
+        elif chamber_l == "senate":
+            sub_resource, response_key = "senate-communication", "senateCommunications"
+        else:
+            return f"Committee communications are not available for {chamber.capitalize()} committees (House and Senate only)."
+
+        endpoint = f"/committee/{chamber_l}/{committee_code}/{sub_resource}"
+
         # Make API request
         response = await safe_committees_request(endpoint, ctx, {"limit": limit})
-        
+
         if "error" in response:
             logger.warning(f"API error for committee communications: {response['error']}")
             return response["error"]
-        
-        communications = response.get("communications", [])
+
+        communications = response.get(response_key, [])
         if not communications:
             return f"No communications found for committee {committee_code} in the {chamber.capitalize()}."
-        
+
         # Deduplicate communications
         communications = ResponseProcessor.deduplicate_results(
-            communications, 
+            communications,
             key_fields=["congress", "number"]
         )
-        
+
         # Format results
         result = [f"Communications for {chamber.capitalize()} Committee {committee_code}:"]
         for comm in communications[:limit]:
             number = comm.get("number", "Unknown")
             congress = comm.get("congress", "Unknown")
             url = comm.get("url", "No URL available")
-            
+
             # Get communication type
             comm_type = comm.get("communicationType", {})
-            type_name = comm_type.get("name", "Unknown")
-            
-            # Get committee referral info
-            committees = comm.get("committees", [])
-            referral_date = "Unknown"
-            if committees:
-                referral_date = committees[0].get("referralDate", "Unknown")
-            
+            type_name = comm_type.get("name", "Unknown") if isinstance(comm_type, dict) else "Unknown"
+
+            # referralDate is a top-level field on each communication
+            referral_date = comm.get("referralDate", "Unknown")
+
             result.append(f"\n**{type_name} {number}** (Congress {congress})")
             result.append(f"Referral Date: {referral_date}")
             result.append(f"URL: {url}")
@@ -523,61 +531,87 @@ async def get_committee_communications(
 
 async def search_committees(
     ctx: Context,
-    keywords: str,
+    keywords: Optional[str] = None,
     chamber: Optional[str] = None,
     congress: Optional[int] = None,
+    committee_type: Optional[str] = None,
     limit: int = 10
 ) -> str:
     """
-    Search for committees based on keywords.
-    
+    Search for / browse congressional committees.
+
     Args:
-        keywords: Keywords to search for in committee information
+        keywords: Optional keywords to search for in committee information.
+                  When omitted, lists committees (optionally filtered by chamber).
         chamber: Optional chamber of Congress ("house", "senate", or "joint")
         congress: Optional Congress number (e.g., 117)
+        committee_type: Optional committee type to filter on (e.g. "standing",
+                        "select"), matched against the committee's type name.
         limit: Maximum number of results to return (default: 10)
     """
     try:
+        keywords = keywords.strip() if isinstance(keywords, str) else None
+
         # Validate parameters
         if chamber and chamber.lower() not in ["house", "senate", "joint"]:
             logger.warning(f"Invalid chamber: {chamber}")
             return f"Invalid chamber '{chamber}'. Must be 'house', 'senate', or 'joint'."
-            
+
         if congress:
             congress_validation = ParameterValidator.validate_congress_number(congress)
             if not congress_validation.is_valid:
                 logger.warning(f"Invalid congress number: {congress}")
                 return congress_validation.error_message
-                
+
         limit_validation = ParameterValidator.validate_limit_range(limit)
         if not limit_validation.is_valid:
             logger.warning(f"Invalid limit: {limit}")
             return limit_validation.error_message
-        
-        # Build search parameters
-        params = {"q": keywords, "limit": limit}
-        if chamber:
-            params["chamber"] = chamber.lower()
-        if congress:
-            params["congress"] = congress
-        
+
+        # The /committee endpoint ignores q/chamber/congress query params, so chamber
+        # is filtered via the PATH and keywords/type are filtered client-side.
+        # (congress is accepted for compatibility but the committee list endpoint is
+        # not congress-scoped; the congress-path variants are intentionally omitted.)
+        chamber_l = chamber.lower() if chamber else None
+        endpoint = f"/committee/{chamber_l}" if chamber_l in ("house", "senate", "joint") else "/committee"
+
+        # Fetch a large page when filtering client-side; the API caps limit at 250.
+        need_filter = bool(keywords or committee_type)
+        params = {"limit": 250 if need_filter else limit}
+
         # Make API request
-        response = await safe_committees_request("/committee", ctx, params)
-        
+        response = await safe_committees_request(endpoint, ctx, params)
+
         if "error" in response:
             logger.warning(f"API error for committee search: {response['error']}")
             return response["error"]
-        
+
         committees = response.get("committees", [])
+
+        # Client-side keyword filter (name / systemCode) — the endpoint has no `q`.
+        if keywords:
+            kw = keywords.lower()
+            committees = [
+                c for c in committees
+                if kw in (c.get("name") or "").lower() or kw in (c.get("systemCode") or "").lower()
+            ]
+        # Client-side type filter against committeeTypeCode (e.g. Standing/Select/Joint).
+        if committee_type:
+            ct = committee_type.lower()
+            committees = [c for c in committees if ct in (c.get("committeeTypeCode") or "").lower()]
+
+        descriptor = f" matching '{keywords}'" if keywords else ""
+        if committee_type:
+            descriptor += f" (type: {committee_type})"
         if not committees:
-            return f"No committees found matching '{keywords}'."
-        
+            return f"No committees found{descriptor}."
+
         # Format results
-        result = [f"Committees matching '{keywords}':"]
+        result = [f"Committees{descriptor}:"]
         for committee in committees[:limit]:
             result.append("\n" + format_committee_summary(committee))
-        
-        logger.info(f"Successfully found {len(committees)} committees for search '{keywords}'")
+
+        logger.info(f"Successfully found {len(committees)} committees (search='{keywords}', type='{committee_type}')")
         return "\n".join(result)
         
     except Exception as e:
