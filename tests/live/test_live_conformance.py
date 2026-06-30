@@ -109,6 +109,24 @@ async def test_search_committee_meetings_no_404(live_ctx):
 
 
 @pytest.mark.asyncio
+async def test_committee_subresources_return_recent(live_ctx):
+    """Committee bills/reports/communications/nominations surface 119th-Congress
+    items via most_recent (oldest-first endpoints jump to the end)."""
+    from congress_api.features.committees import (
+        get_committee_bills, get_committee_reports,
+        get_committee_communications, get_committee_nominations,
+    )
+    bills = await get_committee_bills(live_ctx, committee_code="sseg00", chamber="senate", limit=3)
+    assert "Congress 119" in bills and "total)" in bills
+    reports = await get_committee_reports(live_ctx, committee_code="hsii00", chamber="house", limit=2)
+    assert "Congress 119" in reports
+    comms = await get_committee_communications(live_ctx, committee_code="hspw00", chamber="house", limit=2)
+    assert "Congress 119" in comms
+    noms = await get_committee_nominations(live_ctx, committee_code="ssju00", limit=2)
+    assert "Congress 119" in noms
+
+
+@pytest.mark.asyncio
 async def test_laws_tool_live(live_ctx):
     """Part C: laws tool lists and details enacted laws."""
     from congress_api.features.buckets import laws
