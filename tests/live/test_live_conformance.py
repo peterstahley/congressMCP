@@ -127,6 +127,25 @@ async def test_committee_subresources_return_recent(live_ctx):
 
 
 @pytest.mark.asyncio
+async def test_member_sponsored_legislation_not_truncated(live_ctx):
+    """Regression: the wrapper used to truncate to raw_response[:500] regardless
+    of limit, and dedup used to collapse all amendments in a congress onto one
+    entry. G000559 (Garamendi) has 239 sponsored items live, ~55 of them
+    amendments spread across several congresses."""
+    from congress_api.features.members import get_member_sponsored_legislation
+    from congress_api.features.members_committees_tools import get_member_sponsored_legislation as wrapper
+
+    raw = await get_member_sponsored_legislation(live_ctx, bioguide_id="G000559", limit=250)
+    assert len(raw) > 2000, "response looks truncated"
+    assert not raw.rstrip().endswith("...")
+    assert raw.rstrip().endswith(")"), "response ends mid-entry, not on a complete markdown link"
+
+    resp = await wrapper(live_ctx, bioguide_id="G000559", limit=250)
+    assert resp.results_count > 100, "dedup is likely still collapsing amendments"
+    assert len(resp.summary) == len(raw)
+
+
+@pytest.mark.asyncio
 async def test_laws_tool_live(live_ctx):
     """Part C: laws tool lists and details enacted laws."""
     from congress_api.features.buckets import laws
