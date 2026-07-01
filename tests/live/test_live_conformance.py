@@ -146,6 +146,26 @@ async def test_member_sponsored_legislation_not_truncated(live_ctx):
 
 
 @pytest.mark.asyncio
+async def test_bucket_tools_not_double_converted(live_ctx):
+    """Regression: committee_intelligence/records_and_hearings/research_and_
+    professional/voting_and_nominations top-level tools used to re-convert their
+    route_*_operation's already-structured output, always returning empty
+    results_count=0 and an empty activities/hearings/etc list regardless of real
+    data. Each also had its own duplicate 500-char truncation bug, masked by the
+    double-conversion bug until that was fixed."""
+    from congress_api.features.buckets.committee_intelligence import committee_intelligence
+    from congress_api.features.buckets.records_and_hearings import records_and_hearings
+
+    reports = await committee_intelligence(live_ctx, operation="get_latest_committee_reports")
+    assert reports.results_count > 0, "double-conversion regression: results_count always 0"
+    assert not reports.summary.rstrip().endswith("..."), "duplicate truncation regression"
+
+    hearings = await records_and_hearings(live_ctx, operation="search_hearings", congress=119, chamber="house")
+    assert len(hearings.summary) > 503, "duplicate truncation regression"
+    assert not hearings.summary.rstrip().endswith("...")
+
+
+@pytest.mark.asyncio
 async def test_laws_tool_live(live_ctx):
     """Part C: laws tool lists and details enacted laws."""
     from congress_api.features.buckets import laws
